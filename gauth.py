@@ -9,11 +9,10 @@ import subprocess
 import sys
 import time
 from typing import Optional
-from urllib.parse import quote
-
 import httpx
 import websockets
 from rich.console import Console
+from rich.markup import escape
 from rich.text import Text
 
 console = Console()
@@ -45,16 +44,27 @@ async def get_tabs() -> list[dict]:
 
 
 async def open_tab(url: str) -> Optional[str]:
-    """Open a new tab with the given URL, return its websocket debugger URL."""
-    new_tab_url = f"http://{CDP_HOST}:{CDP_PORT}/json/new?{quote(url, safe='')}"
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(new_tab_url)
-            resp.raise_for_status()
-            tab = resp.json()
+    """Open a new tab with url via Target.createTarget CDP command."""
+    tabs = await get_tabs()
+    page_tabs = [t for t in tabs if t.get("type") == "page"]
+    if not page_tabs:
+        raise RuntimeError("No page tabs found in Opera to use as CDP entry point")
+
+    any_ws = page_tabs[0]["webSocketDebuggerUrl"]
+    result = await cdp_send(any_ws, "Target.createTarget", {"url": url})
+
+    target_id = result.get("result", {}).get("targetId")
+    if not target_id:
+        raise RuntimeError(f"Target.createTarget did not return targetId: {result}")
+
+    # Find the new tab's WS URL
+    await asyncio.sleep(0.5)
+    new_tabs = await get_tabs()
+    for tab in new_tabs:
+        if tab.get("id") == target_id:
             return tab.get("webSocketDebuggerUrl")
-    except Exception as e:
-        raise RuntimeError(f"Failed to open new tab: {e}") from e
+
+    raise RuntimeError(f"Could not find new tab with targetId {target_id}")
 
 
 async def cdp_send(ws_url: str, method: str, params: dict) -> dict:
@@ -76,6 +86,29 @@ async def cdp_send(ws_url: str, method: str, params: dict) -> dict:
             resp = json.loads(raw)
             if resp.get("id") == 1:
                 return resp
+
+
+async def click_next_if_present(ws_url: str) -> bool:
+    """Click the Next/Continue button if present on the page. Returns True if clicked."""
+    result = await cdp_send(
+        ws_url,
+        "Runtime.evaluate",
+        {
+            "expression": """
+                (function() {
+                    const buttons = Array.from(document.querySelectorAll('button'));
+                    const next = buttons.find(b =>
+                        b.innerText.trim().toLowerCase() === 'next' ||
+                        b.innerText.trim().toLowerCase() === 'continue'
+                    );
+                    if (next) { next.click(); return true; }
+                    return false;
+                })()
+            """,
+            "returnByValue": True,
+        },
+    )
+    return result.get("result", {}).get("result", {}).get("value", False)
 
 
 async def get_tab_url(ws_url: str) -> str:
@@ -105,10 +138,13 @@ async def get_page_text(ws_url: str) -> str:
 
 
 async def close_tab(tab_id: str) -> None:
-    close_url = f"http://{CDP_HOST}:{CDP_PORT}/json/close/{tab_id}"
+    tabs = await get_tabs()
+    page_tabs = [t for t in tabs if t.get("type") == "page" and t.get("id") != tab_id]
+    if not page_tabs:
+        return
+    any_ws = page_tabs[0]["webSocketDebuggerUrl"]
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            await client.get(close_url)
+        await cdp_send(any_ws, "Target.closeTarget", {"targetId": tab_id})
     except Exception:
         pass
 
@@ -206,6 +242,11 @@ async def wait_for_auth_code(tab_ws: str, expected_url_fragment: str) -> str:
     deadline = time.monotonic() + AUTH_TIMEOUT
     while time.monotonic() < deadline:
         try:
+            # Auto-click Next/Continue if present
+            try:
+                await click_next_if_present(tab_ws)
+            except Exception:
+                pass
             current_url = await get_tab_url(tab_ws)
             if expected_url_fragment in current_url:
                 # Page has the auth code — extract it
@@ -349,7 +390,7 @@ async def run_auth_flow(
             await close_tab(tab_id)
         ok()
         if output.strip():
-            console.print(f"  [dim]{output.strip()}[/dim]")
+            console.print(f"  [dim]{escape(output.strip())}[/dim]")
     except subprocess.TimeoutExpired:
         fail("gcloud did not complete within 30s")
         proc.kill()
