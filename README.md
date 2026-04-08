@@ -1,6 +1,6 @@
 # gauth
 
-Automates the daily `gcloud auth application-default login` + `gcloud auth login` flow using Opera via Chrome DevTools Protocol (CDP). Designed for Solvinity engineers where both tokens expire every 24 hours and SSO (Entra ID) runs through the browser.
+Automates the daily `gcloud auth application-default login` flow using Opera via Chrome DevTools Protocol (CDP). Designed for Solvinity engineers using **Workforce Identity Federation via Entra ID OIDC**, where the ADC token expires every 24 hours and SSO runs through the browser.
 
 ## What it does
 
@@ -10,7 +10,8 @@ Automates the daily `gcloud auth application-default login` + `gcloud auth login
 4. Extracts the verification code from the redirect page
 5. Submits the code back to gcloud
 6. Runs `gcloud auth application-default set-quota-project solvinity-ai-usage-workplace`
-7. Repeats steps 1–5 for `gcloud auth login`
+
+Optionally (with `--login`): repeats steps 1–5 for `gcloud auth login` (needed for some gcloud CLI operations).
 
 ## Prerequisites
 
@@ -28,10 +29,38 @@ Automates the daily `gcloud auth application-default login` + `gcloud auth login
 pip install -r requirements.txt
 ```
 
+## One-time setup
+
+Before using `gauth` for the first time, run the setup to configure Workforce Identity Federation:
+
+```bash
+python gauth.py --setup
+```
+
+This runs:
+1. `gcloud iam workforce-pools create-login-config` — generates `~/login-config.json`
+2. `gcloud config set auth/login_config_file ~/login-config.json` — points gcloud at it
+
+You only need to do this once per machine.
+
 ## Usage
+
+### Daily auth (ADC only — the default)
 
 ```bash
 python gauth.py
+```
+
+### Daily auth + gcloud login (for full gcloud CLI access)
+
+```bash
+python gauth.py --login
+```
+
+### First-time setup + auth in one go
+
+```bash
+python gauth.py --setup
 ```
 
 ### Optional: install as `gauth` command
@@ -43,6 +72,14 @@ chmod +x ~/.local/bin/gauth
 ```
 
 Then just run `gauth` from anywhere.
+
+## Flags
+
+| Flag | Description |
+|------|-------------|
+| *(none)* | Run ADC flow only (default, covers most use cases) |
+| `--login` | Also run `gcloud auth login` after ADC |
+| `--setup` | Run one-time workforce pool initialization before auth |
 
 ## Error messages
 

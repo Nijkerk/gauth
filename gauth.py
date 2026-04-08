@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-gauth - Automate gcloud ADC + login auth via Opera CDP (Solvinity SSO).
+gauth - Automate gcloud ADC auth via Opera CDP (Solvinity Workforce Identity Federation).
 """
 
+import argparse
 import asyncio
 import json
+import os
 import subprocess
 import sys
 import time
@@ -408,18 +410,108 @@ async def run_auth_flow(
 
 
 # ---------------------------------------------------------------------------
+# One-time setup
+# ---------------------------------------------------------------------------
+
+
+def run_setup(total_steps: int, step_offset: int) -> bool:
+    """
+    Run one-time Workforce Identity Federation initialization:
+      1. Generate login config from workforce pool
+      2. Configure gcloud to use it
+    Returns True on success.
+    """
+    login_config_path = os.path.join(os.path.expanduser("~"), "login-config.json")
+    workforce_pool = (
+        "locations/global/workforcePools/solvinity-entra-id"
+        "/providers/solvinity-entra-id-oidc"
+    )
+
+    step(step_offset, total_steps, "Setup — generating workforce pool login config")
+    result = subprocess.run(
+        [
+            "gcloud",
+            "iam",
+            "workforce-pools",
+            "create-login-config",
+            workforce_pool,
+            f"--output-file={login_config_path}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        fail(result.stderr.strip() or "unknown error")
+        return False
+    ok(f"Saved to {login_config_path}")
+
+    step(step_offset + 1, total_steps, "Setup — configuring gcloud login_config_file")
+    result = subprocess.run(
+        [
+            "gcloud",
+            "config",
+            "set",
+            "auth/login_config_file",
+            login_config_path,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        fail(result.stderr.strip() or "unknown error")
+        return False
+    ok()
+
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 
 async def main() -> int:
-    total_steps = 7  # visual steps (each flow uses 3 sub-steps + misc)
+    parser = argparse.ArgumentParser(
+        description=(
+            "Automate gcloud Application Default Credentials (ADC) auth via Opera CDP. "
+            "Designed for Solvinity engineers using Workforce Identity Federation (Entra ID OIDC). "
+            "Requires Opera running with --remote-debugging-port=9222 and an active SSO session."
+        )
+    )
+    parser.add_argument(
+        "--setup",
+        action="store_true",
+        help=(
+            "Run one-time initialization: generate the workforce pool login config "
+            "and configure gcloud to use it. Run this once before using gauth regularly."
+        ),
+    )
+    parser.add_argument(
+        "--login",
+        action="store_true",
+        help=(
+            "Also run gcloud auth login after ADC. Needed for some gcloud CLI operations "
+            "that require a user account (not just ADC). Off by default."
+        ),
+    )
+    args = parser.parse_args()
+
+    # Calculate total steps based on flags
+    # Base: 2 (opera check, gcloud check) + 3 (ADC flow) + 1 (quota project) = 6
+    # --setup adds 2 steps
+    # --login adds 3 steps
+    setup_steps = 2 if args.setup else 0
+    login_steps = 3 if args.login else 0
+    total_steps = 2 + setup_steps + 3 + 1 + login_steps
+
     console.print()
     console.rule("[bold blue]gauth[/bold blue]")
     console.print()
 
+    current_step = 1
+
     # Step 1: Check Opera
-    step(1, 7, "Checking Opera on port 9222")
+    step(current_step, total_steps, "Checking Opera on port 9222")
     tabs = await get_tabs()
     if not tabs:
         fail("")
@@ -430,30 +522,41 @@ async def main() -> int:
         )
         return 1
     ok(f"{len(tabs)} tab(s) open")
+    current_step += 1
 
     # Step 2: Check gcloud
-    step(2, 7, "Checking gcloud")
+    step(current_step, total_steps, "Checking gcloud")
     if not check_gcloud():
         fail("")
         console.print("[red]gcloud not found in PATH.[/red]")
         return 1
     ok()
+    current_step += 1
 
-    # Steps 3–4: ADC flow
+    # Optional: one-time setup
+    if args.setup:
+        console.print()
+        console.rule("[dim]One-time Setup[/dim]")
+        if not run_setup(total_steps, current_step):
+            return 1
+        current_step += 2
+
+    # ADC flow (3 sub-steps)
     console.print()
     console.rule("[dim]Application Default Credentials[/dim]")
     adc_ok = await run_auth_flow(
-        step_num=3,
-        total_steps=7,
+        step_num=current_step,
+        total_steps=total_steps,
         label="ADC",
         gcloud_args=["auth", "application-default", "login"],
         expected_url_fragment=AUTH_CODE_URL_ADC,
     )
     if not adc_ok:
         return 1
+    current_step += 3
 
     # Set quota project
-    step(5, 7, "Setting ADC quota project")
+    step(current_step, total_steps, "Setting ADC quota project")
     result = subprocess.run(
         [
             "gcloud",
@@ -469,19 +572,21 @@ async def main() -> int:
         fail(result.stderr.strip() or "unknown error")
         return 1
     ok()
+    current_step += 1
 
-    # Steps 6–7: gcloud auth login flow
-    console.print()
-    console.rule("[dim]gcloud auth login[/dim]")
-    login_ok = await run_auth_flow(
-        step_num=6,
-        total_steps=7,
-        label="Login",
-        gcloud_args=["auth", "login"],
-        expected_url_fragment=AUTH_CODE_URL_LOGIN,
-    )
-    if not login_ok:
-        return 1
+    # Optional: gcloud auth login flow (3 sub-steps)
+    if args.login:
+        console.print()
+        console.rule("[dim]gcloud auth login[/dim]")
+        login_ok = await run_auth_flow(
+            step_num=current_step,
+            total_steps=total_steps,
+            label="Login",
+            gcloud_args=["auth", "login"],
+            expected_url_fragment=AUTH_CODE_URL_LOGIN,
+        )
+        if not login_ok:
+            return 1
 
     console.print()
     console.rule("[bold green]Done. Claude is ready.[/bold green]")
