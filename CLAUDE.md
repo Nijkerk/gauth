@@ -39,12 +39,13 @@ To use `Target.createTarget`, you need an existing page tab's WebSocket URL as e
 - `submit_auth_code(proc, code)` — writes code to gcloud stdin, reads remaining output
 
 ## Known issues / edge cases
+- If Opera is not running, gauth automatically starts it with `opera --remote-debugging-port=9222 --remote-allow-origins=*` and polls up to 20 seconds until CDP is available. No manual Opera startup needed.
 - If SSO session in Opera is expired, `wait_for_auth_code` will time out after 90s. User must manually open a Google URL in Opera to re-establish SSO.
 - The `4/...` code regex in `extract_code_from_page()` matches standard Google OAuth codes. If Google changes the format, this is the place to fix.
 - `rich` output: always use `escape()` from `rich.markup` when printing gcloud output — it contains paths like `[/home/...]` that rich misinterprets as markup tags.
 
 ## Environment
-- Opera runs with `--remote-debugging-port=9222` (iptables blocks non-loopback access)
+- Opera is auto-started if not already running (`--remote-debugging-port=9222 --remote-allow-origins=*`). Port 9222 protected by iptables (blocks non-loopback access).
 - gcloud config: `~/.config/gcloud/application_default_credentials.json`
 - Quota project: `solvinity-ai-usage-workplace`
 - Python 3.10+, dependencies: `websockets`, `rich`, `httpx`
@@ -58,4 +59,7 @@ python gauth.py
 gauth
 ```
 
-Prerequisites: Opera running with CDP port open, active Solvinity SSO session in Opera.
+Prerequisites: active Solvinity SSO session in Opera (Opera is auto-started if needed).
+
+## Integration
+gauth is called automatically once per day by the `vpn` bash function (defined in `~/bashrc_programs/.bash_vpn`). The bash wrapper checks a daily marker at `~/.local/state/gauth/last_run` and skips re-running gauth if it already ran today. The marker file is managed by the bash wrapper, not by gauth itself.
