@@ -510,17 +510,26 @@ async def main() -> int:
 
     current_step = 1
 
-    # Step 1: Check Opera
+    # Step 1: Check Opera (start if not running)
     step(current_step, total_steps, "Checking Opera on port 9222")
     tabs = await get_tabs()
     if not tabs:
-        fail("")
-        console.print(
-            "[red]Opera is not running with --remote-debugging-port=9222.[/red]\n"
-            "Start Opera with:\n"
-            "  [bold]opera --remote-debugging-port=9222[/bold]"
+        console.print("[yellow]not running, starting...[/yellow]")
+        subprocess.Popen(
+            ["opera", "--remote-debugging-port=9222", "--remote-allow-origins=*"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        return 1
+        # Poll until CDP is available
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            await asyncio.sleep(1)
+            tabs = await get_tabs()
+            if tabs:
+                break
+        if not tabs:
+            fail("Opera did not start within 20s")
+            return 1
     ok(f"{len(tabs)} tab(s) open")
     current_step += 1
 
